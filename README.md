@@ -24,9 +24,14 @@ A web-based chord generator inspired by the [Telepathic Instruments Orchid](http
 - **Quantize to Key**: Snap input notes to the selected scale
 - **Auto Chord Type**: Automatically select chord quality based on scale degree
 
+### Operating Modes
+- **Chord Generation**: Transform single notes into full chords
+- **Quantize Only**: Pass through single notes, snapped to the selected scale
+- **Pass-through**: Send notes directly without modification
+
 ### Split Keyboard
 Split your MIDI keyboard into two independent zones, each with its own:
-- Mode (Chord Generation or Pass-through)
+- Mode (Chord Generation, Quantize Only, or Pass-through)
 - Chord type settings
 - Playstyle (Simple, Advanced, Free)
 - Performance mode
@@ -37,6 +42,7 @@ Split your MIDI keyboard into two independent zones, each with its own:
 - **MIDI Output**: Route generated chords to DAWs or hardware synths
 - **Velocity Sensitivity**: Input velocity is preserved in output
 - **Suppress Root**: Option to omit the root note (useful when your input device plays the note)
+- **Mute Built-in Synth**: Disable the preview audio when using external instruments
 
 ### Visual Feedback
 - On-screen keyboard shows input notes (red) and generated notes (teal)

@@ -807,6 +807,7 @@ class OrchardEngine {
 
   // Play a note using Web Audio (for preview without MIDI)
   playAudioNote(midiNote, velocity = 100) {
+    if (this.state.muteAudio) return null;
     if (!this.audioContext) this.initAudio();
 
     const freq = 440 * Math.pow(2, (midiNote - 69) / 12);
@@ -1500,6 +1501,14 @@ function setupControls() {
   // Suppress root option
   document.getElementById('suppressRoot').addEventListener('change', (e) => {
     engine.setSuppressRoot(e.target.checked);
+  });
+
+  // Mute audio option
+  document.getElementById('muteAudio').addEventListener('change', (e) => {
+    engine.state.muteAudio = e.target.checked;
+    if (e.target.checked) {
+      engine.stopAllAudio();
+    }
   });
 
   // Split keyboard controls
