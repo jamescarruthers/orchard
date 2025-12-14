@@ -61,35 +61,11 @@ Split your MIDI keyboard into two independent zones, each with its own:
 - **A-L**: White keys (C to high C)
 - **W, E, T, Y, U, O, P**: Black keys
 
-## MIDI Channel Routing
-
-Orchard outputs on three MIDI channels for flexible routing:
-- **Channel 1**: Main chord notes
-- **Channel 2**: Performance mode notes (strum, arp, harp)
-- **Channel 3**: Bass notes
-
 ## Browser Requirements
 
 - Modern browser with Web MIDI API support (Chrome, Edge, Opera)
 - Firefox requires enabling `dom.webmidi.enabled` in `about:config`
 - Safari does not currently support Web MIDI
-
-## Local Development
-
-No build process required. Simply serve the files with any local web server:
-
-```bash
-# Python 3
-python -m http.server 8000
-
-# Node.js (with http-server)
-npx http-server
-
-# PHP
-php -S localhost:8000
-```
-
-Then open `http://localhost:8000` in your browser.
 
 ## Files
 
