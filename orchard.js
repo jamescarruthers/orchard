@@ -609,14 +609,30 @@ class OrchardEngine {
     }
 
     // Chord generation mode
-    // Store the actual MIDI note for proper release
-    this.state.activeMidiNote = midiNote;
-    this.state.activeKey = keyNote;
-    this.state.velocity = velocity;
+    // Determine which zone this note belongs to
+    const zoneName = this.getZoneNameForNote(midiNote);
 
-    // Get zone-specific chord type if split enabled
-    const zoneChordType = this.getZoneChordType(midiNote);
-    this.updateOutputWithOptions(velocity, midiNote, zoneChordType);
+    // For split mode, track per-zone; for non-split, use the legacy single-note approach
+    if (this.state.split.enabled) {
+      // Store zone-specific active note
+      this.state.zoneActiveNotes[zoneName] = {
+        midiNote,
+        keyNote,
+        velocity
+      };
+
+      // Generate output for this zone
+      const zoneChordType = this.getZoneChordType(midiNote);
+      this.updateOutputForZone(velocity, midiNote, zoneChordType, zoneName);
+    } else {
+      // Non-split mode: use legacy single-note tracking
+      this.state.activeMidiNote = midiNote;
+      this.state.activeKey = keyNote;
+      this.state.velocity = velocity;
+
+      const zoneChordType = this.getZoneChordType(midiNote);
+      this.updateOutputWithOptions(velocity, midiNote, zoneChordType);
+    }
   }
 
   onMIDINoteOff(midiNote) {
@@ -642,10 +658,22 @@ class OrchardEngine {
     }
 
     // Chord generation note release
-    if (this.state.activeMidiNote === midiNote) {
-      this.stopOutput();
-      this.state.activeKey = null;
-      this.state.activeMidiNote = null;
+    if (this.state.split.enabled) {
+      // Split mode: check which zone this note belongs to and release only that zone
+      const zoneName = this.getZoneNameForNote(midiNote);
+      const zoneNote = this.state.zoneActiveNotes[zoneName];
+
+      if (zoneNote && zoneNote.midiNote === midiNote) {
+        this.stopOutputForZone(zoneName);
+        this.state.zoneActiveNotes[zoneName] = null;
+      }
+    } else {
+      // Non-split mode: legacy single-note behavior
+      if (this.state.activeMidiNote === midiNote) {
+        this.stopOutput();
+        this.state.activeKey = null;
+        this.state.activeMidiNote = null;
+      }
     }
   }
 
@@ -674,6 +702,10 @@ class OrchardEngine {
 
   getZoneForNote(midiNote) {
     return midiNote < this.state.split.point ? this.state.split.lower : this.state.split.upper;
+  }
+
+  getZoneNameForNote(midiNote) {
+    return midiNote < this.state.split.point ? 'lower' : 'upper';
   }
 
   getEffectiveSettings(midiNote) {
@@ -752,6 +784,11 @@ class OrchardEngine {
       velocity: 100,
       suppressRoot: false,
       muteAudio: false,
+      // Zone-specific active notes for split mode polyphony
+      zoneActiveNotes: {
+        lower: null, // { midiNote, keyNote, velocity, chordNotes }
+        upper: null
+      },
       // Global mode (when split disabled)
       globalMode: 'chord', // 'off' or 'chord'
       // Split keyboard settings
@@ -978,6 +1015,270 @@ class OrchardEngine {
     this.sendOutput(output, velocity, rootNote, settings);
   }
 
+  // Zone-specific output for split mode polyphony
+  updateOutputForZone(velocity, midiNote, zoneChordType, zoneName) {
+    const keyNote = midiNote % 12;
+    let rootNote = midiNote;
+
+    // Get zone-specific settings
+    const settings = this.getEffectiveSettings(midiNote);
+
+    // Apply quantization if enabled
+    if (settings.quantize.enabled) {
+      rootNote = quantizeNoteToKey(rootNote, settings.quantize.root, settings.quantize.scale);
+    }
+
+    // Determine chord type
+    let chordType = null;
+    if (zoneChordType === 'auto') {
+      chordType = getKeyModeChordType(rootNote % 12, settings.keyMode.root, settings.keyMode.scale);
+    } else if (zoneChordType) {
+      chordType = zoneChordType;
+    } else {
+      chordType = this.state.activeChordType;
+      if (!chordType && settings.keyMode.enabled) {
+        chordType = getKeyModeChordType(rootNote % 12, settings.keyMode.root, settings.keyMode.scale);
+      }
+    }
+
+    let output;
+    let displayName;
+
+    if (chordType) {
+      const baseChord = generateChord(rootNote, chordType, this.state.activeExtensions);
+      output = applyVoicing(baseChord, this.state.voicingPosition);
+      displayName = getChordDisplayName(rootNote, chordType, this.state.activeExtensions);
+    } else {
+      output = [rootNote];
+      displayName = NOTE_NAMES[rootNote % 12];
+    }
+
+    // Store the generated notes for this zone
+    this.state.zoneActiveNotes[zoneName].chordNotes = output;
+
+    // Update display (show combined info from both zones if both active)
+    this.updateZoneDisplay();
+
+    // Highlight generated notes
+    this.updateZoneHighlights();
+
+    // Send output for this zone (additive, don't stop other zone)
+    this.sendZoneOutput(output, velocity, rootNote, settings, zoneName);
+  }
+
+  updateZoneDisplay() {
+    const lower = this.state.zoneActiveNotes.lower;
+    const upper = this.state.zoneActiveNotes.upper;
+
+    let displayParts = [];
+    let allNotes = [];
+
+    if (lower && lower.chordNotes) {
+      allNotes = allNotes.concat(lower.chordNotes);
+    }
+    if (upper && upper.chordNotes) {
+      allNotes = allNotes.concat(upper.chordNotes);
+    }
+
+    const nameEl = document.getElementById('chordName');
+    const notesEl = document.getElementById('chordNotes');
+
+    if (allNotes.length > 0) {
+      if (nameEl) nameEl.textContent = 'Split';
+      if (notesEl) notesEl.textContent = allNotes.map(midiNoteToName).join(' ');
+    } else {
+      if (nameEl) nameEl.textContent = '-';
+      if (notesEl) notesEl.textContent = 'Press a key to play';
+    }
+  }
+
+  updateZoneHighlights() {
+    // Clear previous highlights
+    this.clearGeneratedHighlights();
+
+    // Highlight notes from both zones
+    const lower = this.state.zoneActiveNotes.lower;
+    const upper = this.state.zoneActiveNotes.upper;
+
+    let allNotes = [];
+    if (lower && lower.chordNotes) {
+      allNotes = allNotes.concat(lower.chordNotes);
+    }
+    if (upper && upper.chordNotes) {
+      allNotes = allNotes.concat(upper.chordNotes);
+    }
+
+    this.highlightGeneratedNotes(allNotes);
+  }
+
+  sendZoneOutput(notes, velocity, rootNote, settings, zoneName) {
+    const perfMode = settings.performanceMode;
+
+    // Filter root if suppress enabled
+    const rootPitchClass = rootNote % 12;
+    const filterRoot = (noteArray) => {
+      if (!this.state.suppressRoot) return noteArray;
+      return noteArray.filter(n => (n % 12) !== rootPitchClass);
+    };
+
+    const filteredNotes = filterRoot(notes);
+
+    // Send chord notes (additive - don't turn off other zone's notes)
+    filteredNotes.forEach(note => {
+      this.midi.noteOn(MIDI_CHANNELS.CHORD, note, velocity);
+    });
+
+    // Send bass only for lower zone (typically bass comes from left hand)
+    if (zoneName === 'lower' && !this.state.suppressRoot) {
+      const bassNote = applyBassVoicing(notes[0], this.state.bassOctave);
+      this.midi.noteOn(MIDI_CHANNELS.BASS, bassNote, velocity);
+    }
+
+    // Handle performance mode
+    switch (perfMode) {
+      case 'strum':
+        const strumEvents = generateStrum(filteredNotes, this.state.performanceDial, velocity);
+        this.scheduleZoneEvents(strumEvents, zoneName);
+        break;
+      case 'strum2oct':
+        const strum2Events = generateStrum(filteredNotes, this.state.performanceDial, velocity, { twoOctaves: true });
+        this.scheduleZoneEvents(strum2Events, zoneName);
+        break;
+      case 'slop':
+        const slopEvents = generateStrum(filteredNotes, this.state.performanceDial, velocity, { slop: this.state.performanceDial });
+        this.scheduleZoneEvents(slopEvents, zoneName);
+        break;
+      case 'arp':
+      case 'arp2oct':
+        // For arp in split mode, start a zone-specific arp loop
+        this.startZoneArpLoop(zoneName, perfMode === 'arp2oct');
+        break;
+      case 'harp':
+        const harpEvents = generateHarp(filteredNotes, this.state.bpm, velocity);
+        this.scheduleZoneEvents(harpEvents, zoneName);
+        break;
+      case 'off':
+      default:
+        // Play audio preview
+        filteredNotes.forEach(note => this.playAudioNote(note, velocity));
+        break;
+    }
+  }
+
+  scheduleZoneEvents(events, zoneName) {
+    events.forEach(e => {
+      const timeoutId = setTimeout(() => {
+        const zoneNote = this.state.zoneActiveNotes[zoneName];
+        if (zoneNote) {
+          this.midi.noteOn(e.channel, e.note, e.velocity);
+          this.playAudioNote(e.note, e.velocity);
+          if (e.durationMs) {
+            setTimeout(() => {
+              this.midi.noteOff(e.channel, e.note);
+              this.stopAudioNote(e.note);
+            }, e.durationMs);
+          }
+        }
+      }, e.delayMs);
+      this.midi.pendingTimeouts.push(timeoutId);
+    });
+  }
+
+  startZoneArpLoop(zoneName, twoOctaves) {
+    const zoneNote = this.state.zoneActiveNotes[zoneName];
+    if (!zoneNote) return;
+
+    // Store arp loop reference for this zone
+    this.state.zoneActiveNotes[zoneName].arpLoopId = Symbol('arpLoop');
+    const loopId = this.state.zoneActiveNotes[zoneName].arpLoopId;
+
+    const playSequence = (isFirstCycle) => {
+      const currentZoneNote = this.state.zoneActiveNotes[zoneName];
+      if (!currentZoneNote || currentZoneNote.arpLoopId !== loopId) return null;
+
+      let notes = currentZoneNote.chordNotes;
+      if (!notes) return null;
+
+      // Filter root on first cycle only
+      if (this.state.suppressRoot && isFirstCycle) {
+        const rootPitchClass = currentZoneNote.midiNote % 12;
+        notes = notes.filter(n => (n % 12) !== rootPitchClass);
+      }
+
+      const arpResult = generateArpeggio(
+        notes,
+        this.state.bpm,
+        this.state.arpPattern,
+        this.state.arpDivision,
+        currentZoneNote.velocity,
+        { twoOctaves }
+      );
+
+      // Schedule MIDI events
+      arpResult.sequence.forEach(e => {
+        const timeoutId = setTimeout(() => {
+          const activeZoneNote = this.state.zoneActiveNotes[zoneName];
+          if (activeZoneNote && activeZoneNote.arpLoopId === loopId) {
+            this.midi.noteOn(e.channel, e.note, e.velocity);
+            this.playAudioNote(e.note, e.velocity);
+            if (e.durationMs) {
+              setTimeout(() => {
+                this.midi.noteOff(e.channel, e.note);
+                this.stopAudioNote(e.note);
+              }, e.durationMs);
+            }
+          }
+        }, e.delayMs);
+        this.midi.pendingTimeouts.push(timeoutId);
+      });
+
+      return arpResult.totalDurationMs;
+    };
+
+    const firstDuration = playSequence(true);
+    if (!firstDuration) return;
+
+    const scheduleNext = (duration) => {
+      const timeoutId = setTimeout(() => {
+        const currentZoneNote = this.state.zoneActiveNotes[zoneName];
+        if (currentZoneNote && currentZoneNote.arpLoopId === loopId) {
+          const nextDuration = playSequence(false);
+          if (nextDuration) scheduleNext(nextDuration);
+        }
+      }, duration);
+      this.midi.pendingTimeouts.push(timeoutId);
+    };
+
+    scheduleNext(firstDuration);
+  }
+
+  stopOutputForZone(zoneName) {
+    const zoneNote = this.state.zoneActiveNotes[zoneName];
+    if (!zoneNote) return;
+
+    // Stop any arp loop for this zone
+    if (zoneNote.arpLoopId) {
+      zoneNote.arpLoopId = null;
+    }
+
+    // Turn off the chord notes for this zone
+    if (zoneNote.chordNotes) {
+      zoneNote.chordNotes.forEach(note => {
+        this.midi.noteOff(MIDI_CHANNELS.CHORD, note);
+        this.stopAudioNote(note);
+      });
+    }
+
+    // Turn off bass if this is the lower zone
+    if (zoneName === 'lower') {
+      this.midi.allNotesOff(MIDI_CHANNELS.BASS);
+    }
+
+    // Update highlights to show only remaining zone
+    this.updateZoneHighlights();
+    this.updateZoneDisplay();
+  }
+
   updateDisplay(chordName, notes) {
     const nameEl = document.getElementById('chordName');
     const notesEl = document.getElementById('chordNotes');
@@ -1076,9 +1377,10 @@ class OrchardEngine {
   playArpAudio(arpParams) {
     const { twoOctaves } = arpParams;
 
-    const playSequence = () => {
+    const playSequence = (isFirstCycle) => {
       // Regenerate chord with current extensions
-      const currentNotes = this.generateCurrentArpNotes();
+      // Only suppress root on the first cycle
+      const currentNotes = this.generateCurrentArpNotes(isFirstCycle);
       if (!currentNotes) return;
 
       const arpResult = generateArpeggio(
@@ -1102,27 +1404,29 @@ class OrchardEngine {
       return arpResult.totalDurationMs;
     };
 
-    const totalDurationMs = playSequence();
+    const firstDuration = playSequence(true); // First cycle - suppress root
+    if (!firstDuration) return;
 
     // Loop with dynamic regeneration
-    const scheduleNext = () => {
+    const scheduleNext = (duration) => {
       this.arpAudioLoop = setTimeout(() => {
         if (this.state.activeKey !== null) {
-          const nextDuration = playSequence();
-          if (nextDuration) scheduleNext();
+          const nextDuration = playSequence(false); // Subsequent cycles - include root
+          if (nextDuration) scheduleNext(nextDuration);
         }
-      }, totalDurationMs);
+      }, duration);
     };
 
-    if (totalDurationMs) scheduleNext();
+    scheduleNext(firstDuration);
   }
 
   startArpLoop(arpParams) {
     const { twoOctaves } = arpParams;
 
-    const playSequence = () => {
+    const playSequence = (isFirstCycle) => {
       // Regenerate chord with current extensions
-      const currentNotes = this.generateCurrentArpNotes();
+      // Only suppress root on the first cycle
+      const currentNotes = this.generateCurrentArpNotes(isFirstCycle);
       if (!currentNotes) return null;
 
       const arpResult = generateArpeggio(
@@ -1148,24 +1452,25 @@ class OrchardEngine {
       return arpResult.totalDurationMs;
     };
 
-    const totalDurationMs = playSequence();
+    const firstDuration = playSequence(true); // First cycle - suppress root
+    if (!firstDuration) return;
 
     // Loop with dynamic regeneration
-    const scheduleNext = () => {
+    const scheduleNext = (duration) => {
       const loopId = setTimeout(() => {
         if (this.state.activeKey !== null) {
-          const nextDuration = playSequence();
-          if (nextDuration) scheduleNext();
+          const nextDuration = playSequence(false); // Subsequent cycles - include root
+          if (nextDuration) scheduleNext(nextDuration);
         }
-      }, totalDurationMs);
+      }, duration);
 
       this.midi.pendingTimeouts.push(loopId);
     };
 
-    if (totalDurationMs) scheduleNext();
+    scheduleNext(firstDuration);
   }
 
-  generateCurrentArpNotes() {
+  generateCurrentArpNotes(suppressRootOnThisCycle = false) {
     if (this.state.activeKey === null) return null;
 
     let keyNote = this.state.activeKey;
@@ -1191,8 +1496,8 @@ class OrchardEngine {
     const baseChord = generateChord(rootNote, chordType, this.state.activeExtensions);
     const voicedChord = applyVoicing(baseChord, this.state.voicingPosition);
 
-    // Filter root if needed
-    if (this.state.suppressRoot) {
+    // Filter root only on first cycle if suppress is enabled
+    if (this.state.suppressRoot && suppressRootOnThisCycle) {
       const rootPitchClass = rootNote % 12;
       return voicedChord.filter(n => (n % 12) !== rootPitchClass);
     }
